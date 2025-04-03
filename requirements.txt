@@ -7,3 +7,4 @@ tensorflow
 scikit-learn
 requests
 xgboost
+lightgbm
