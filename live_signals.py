@@ -7,6 +7,7 @@ from fastapi import FastAPI, WebSocket
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
 import asyncio
+import yfinance as yf
 
 app = FastAPI()
 
@@ -38,23 +39,29 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"Client disconnected: {e}")
         clients.remove(websocket)
 
-def get_live_stock_data():
-    """ Fetch live stock data from Yahoo Finance. """
+def get_live_stock_data(stock):
     try:
-        response = requests.get(API_URL)
-        data = response.json()
-        quote = data["quoteResponse"]["result"][0]
-        
+        df = yf.download(stock, interval="1h", period="30d")
+        print(f"Downloaded Data: \n{df.tail()}")  # Debug print
+
+        if df.empty:
+            return None  # No data available
+
+        # Reset MultiIndex column names (flatten them)
+        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+
+        latest_data = df.iloc[-1]  # Get the last row
+
+        # Convert the latest row to a dictionary
+        latest_data_dict = latest_data.to_dict()
+
         return {
-            "Date": datetime.now(),
-            "Close": quote["regularMarketPrice"],
-            "High": quote["regularMarketDayHigh"],
-            "Low": quote["regularMarketDayLow"],
-            "Open": quote["regularMarketOpen"],
-            "Volume": quote["regularMarketVolume"],
+            "STOCK_SYMBOL": stock,
+            "latest_data": latest_data
         }
+
     except Exception as e:
-        print("Error fetching live data:", e)
+        print(f"Error fetching stock data: {e}")
         return None
 
 def preprocess_data(live_data, prev_data):
@@ -92,8 +99,11 @@ def preprocess_data(live_data, prev_data):
 
 async def send_live_signal():
     """ Predict price change and send buy/sell signals to clients. """
-    live_data = get_live_stock_data()
-    if not live_data:
+    live_data = get_live_stock_data(STOCK_SYMBOL)  # Pass stock symbol
+
+    # Check if fetching data failed
+    if isinstance(live_data, dict) and "error" in live_data:
+        print(f"Error fetching stock data: {live_data['error']}")
         return
 
     # Load historical data to compute rolling features
@@ -101,6 +111,10 @@ async def send_live_signal():
     historical_df.set_index("Date", inplace=True)
     historical_df.fillna(method="bfill", inplace=True)
 
+    # Ensure timestamps are unique
+    historical_df = historical_df[~historical_df.index.duplicated(keep='last')]
+
+    # Preprocess live data
     X_live, df_live = preprocess_data(live_data, historical_df)
 
     # Make predictions
@@ -144,18 +158,34 @@ def read_root():
     return {"message": "Live Stock Signal API Running!"}
 
 @app.get("/predict")
-def get_prediction():
-    """ Fetch live data, make predictions, and return the signal. """
-    live_data = get_live_stock_data()
-    if not live_data:
+def get_prediction(stock: str):
+    live_df = get_live_stock_data(stock)
+    
+    if live_df is None:
         return {"error": "Failed to fetch live stock data"}
+    
+    # If it's a dict, wrap in DataFrame
+    if isinstance(live_df, dict):
+        live_df = pd.DataFrame([live_df])
+    
+    if live_df.empty:
+        return {"error": "Live data is empty"}
+    
+    # Ensure timestamps are unique
+    live_df = live_df[~live_df.index.duplicated(keep='last')]
+
+    return live_df
 
     # Load historical data
     historical_df = pd.read_csv("C:/Users/Admin/Intraday/Data/Merged_ICICIBANK.NS.csv", parse_dates=["Date"])
+    print(historical_df.index.duplicated().sum())  # Count duplicate indexes
+    #print(live_data.index.duplicated().sum())
     historical_df.set_index("Date", inplace=True)
-    historical_df.fillna(method="bfill", inplace=True)
+    historical_df.bfill(inplace=True)
 
     # Preprocess live data
+    # Ensure timestamps are unique
+    live_df = live_df[~live_df.index.duplicated(keep='last')]
     X_live, df_live = preprocess_data(live_data, historical_df)
 
     # Make predictions
